@@ -413,6 +413,7 @@ pub enum QueryPlannerContent {
     Plan {
         query: Arc<Query>,
         plan: Arc<QueryPlan>,
+        errors: Vec<Error>,
     },
     Introspection {
         response: Box<Response>,
@@ -441,11 +442,11 @@ impl QueryPlannerResponse {
         headers: MultiMap<IntoHeaderName, IntoHeaderValue>,
         context: Context,
     ) -> Result<QueryPlannerResponse, BoxError> {
-        tracing::warn!("no way to propagate error response from QueryPlanner");
         Ok(QueryPlannerResponse::new(
             QueryPlannerContent::Plan {
                 plan: Arc::new(QueryPlan::fake_builder().build()),
                 query: Arc::new(Query::default()),
+                errors,
             },
             context,
         ))

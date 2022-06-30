@@ -162,8 +162,13 @@ where
                     }
                     .boxed());
                 }
-                QueryPlannerContent::Plan { query, plan } => {
-                    if let Some(err) = query.validate_variables(body, &schema).err() {
+                QueryPlannerContent::Plan {
+                    query,
+                    mut errors,
+                    plan,
+                } => {
+                    if let Some(mut err) = query.validate_variables(body, &schema).err() {
+                        err.append_errors(&mut errors);
                         Ok(RouterResponse::new_from_graphql_response(err, context).boxed())
                     } else {
                         let operation_name = body.operation_name.clone();
@@ -179,6 +184,12 @@ where
                                     .build(),
                             )
                             .await?;
+                        let response = response.map(move |stream| {
+                            stream.map(move |mut r| {
+                                r.errors.extend(errors.iter().cloned());
+                                r
+                            })
+                        });
 
                         let (parts, response_stream) = http::Response::from(response).into_parts();
                         Ok(RouterResponse {
