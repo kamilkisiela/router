@@ -1472,4 +1472,185 @@ mod tests {
         // All three should execute successfully
         // The DAG scheduler should handle the explicit dependency from B to A
     }
+
+    #[tokio::test]
+    async fn dag_scheduler_waits_for_all_deps() {
+        // This test verifies that a node waits for ALL its dependencies before executing
+        // Test scenario: D depends on both A and B
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let mut subgraph_a = mockito::Server::new_async().await;
+        let mut subgraph_b = mockito::Server::new_async().await;
+        let mut subgraph_d = mockito::Server::new_async().await;
+        
+        let data = crate::response::value::Value::Null;
+        let subgraph_endpoint_map = HashMap::from([
+            (
+                "subgraph_a".to_string(),
+                format!("http://{}/graphql", subgraph_a.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+            (
+                "subgraph_b".to_string(),
+                format!("http://{}/graphql", subgraph_b.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+            (
+                "subgraph_d".to_string(),
+                format!("http://{}/graphql", subgraph_d.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+        ]);
+        
+        let executor = Executor {
+            variable_values: &None,
+            schema_metadata: &SchemaMetadata::default(),
+            executors: &SubgraphExecutorMap::from_http_endpoint_map(
+                &subgraph_endpoint_map,
+                HiveRouterConfig::default().into(),
+                Arc::new(TelemetryContext::from_propagation_config(
+                    &Default::default(),
+                )),
+            )
+            .unwrap(),
+            client_request: &ClientRequestDetails {
+                method: &http::Method::POST,
+                url: &"http://example.com".parse().unwrap(),
+                headers: &HeaderMap::new(),
+                operation: OperationDetails {
+                    name: None,
+                    query: "{ from_a from_b from_d }",
+                    kind: "query",
+                },
+                jwt: JwtRequestDetails::Unauthenticated,
+            },
+            headers_plan: &HeaderRulesPlan::default(),
+            jwt_forwarding_plan: None,
+            dedupe_subgraph_requests: false,
+        };
+
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc as StdArc;
+        
+        let a_done = StdArc::new(AtomicBool::new(false));
+        let b_done = StdArc::new(AtomicBool::new(false));
+        let a_done_clone = a_done.clone();
+        let b_done_clone = b_done.clone();
+        let a_done_for_d = a_done.clone();
+        let b_done_for_d = b_done.clone();
+
+        // Mock subgraphs with delays
+        let mock_a = subgraph_a
+            .mock("POST", "/graphql")
+            .with_chunked_body(move |writer| {
+                std::thread::sleep(Duration::from_millis(50));
+                a_done_clone.store(true, Ordering::SeqCst);
+                writer.write_fmt(format_args!(r#"{{"data":{{"from_a":"value_a"}}}}"#))
+            })
+            .create();
+
+        let mock_b = subgraph_b
+            .mock("POST", "/graphql")
+            .with_chunked_body(move |writer| {
+                std::thread::sleep(Duration::from_millis(50));
+                b_done_clone.store(true, Ordering::SeqCst);
+                writer.write_fmt(format_args!(r#"{{"data":{{"from_b":"value_b"}}}}"#))
+            })
+            .create();
+
+        let mock_d = subgraph_d
+            .mock("POST", "/graphql")
+            .with_chunked_body(move |writer| {
+                // D should only be called after both A and B are done
+                let a_was_done = a_done_for_d.load(Ordering::SeqCst);
+                let b_was_done = b_done_for_d.load(Ordering::SeqCst);
+                assert!(a_was_done, "D was called before A completed");
+                assert!(b_was_done, "D was called before B completed");
+                writer.write_fmt(format_args!(r#"{{"data":{{"from_d":"value_d"}}}}"#))
+            })
+            .create();
+
+        let mut exec_ctx = ExecutionContext {
+            data,
+            ..Default::default()
+        };
+
+        let dummy_doc = Document {
+            operation: OperationDefinition {
+                name: None,
+                operation_kind: None,
+                variable_definitions: None,
+                selection_set: SelectionSet { items: vec![] },
+            },
+            fragments: vec![],
+        };
+        
+        // Test Plan: Parallel block with three fetches
+        // A and B have no dependencies
+        // D depends on both A and B
+        // Expected: A and B run in parallel, D waits for BOTH
+        executor
+            .execute_plan_node(
+                &mut exec_ctx,
+                &PlanNode::Parallel(ParallelNode {
+                    nodes: vec![
+                        PlanNode::Fetch(FetchNode {
+                            id: 1,
+                            service_name: "subgraph_a".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_a }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                            depends_on: None, // A has no dependencies
+                        }),
+                        PlanNode::Fetch(FetchNode {
+                            id: 2,
+                            service_name: "subgraph_b".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_b }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                            depends_on: None, // B has no dependencies
+                        }),
+                        PlanNode::Fetch(FetchNode {
+                            id: 4,
+                            service_name: "subgraph_d".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_d }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                            depends_on: Some(vec![1, 2]), // D depends on BOTH A and B
+                        }),
+                    ],
+                }),
+            )
+            .await;
+        
+        mock_a.assert();
+        mock_b.assert();
+        mock_d.assert();
+    }
 }
