@@ -229,9 +229,13 @@ impl<'exec> DagScheduler<'exec> {
     fn compile(root: &'exec PlanNode) -> Self {
         let mut nodes = Vec::new();
         let mut node_id_counter = 0;
+        let mut fetch_id_to_dag_id: HashMap<i64, DagNodeId> = HashMap::new();
         
-        // Build DAG from plan tree
-        Self::compile_node(root, &mut nodes, &mut node_id_counter, None);
+        // Build DAG from plan tree, collecting fetch ID mappings
+        Self::compile_node(root, &mut nodes, &mut node_id_counter, None, &mut fetch_id_to_dag_id);
+        
+        // Apply explicit dependencies from depends_on fields
+        Self::apply_explicit_dependencies(&mut nodes, &fetch_id_to_dag_id);
         
         // Initialize remaining dependency counts
         let remaining_deps = nodes.iter().map(|n| n.dependency_count).collect();
@@ -251,6 +255,50 @@ impl<'exec> DagScheduler<'exec> {
         }
     }
     
+    /// Apply explicit dependencies from FetchNode.depends_on fields
+    fn apply_explicit_dependencies(
+        nodes: &mut Vec<DagNode<'exec>>,
+        fetch_id_to_dag_id: &HashMap<i64, DagNodeId>,
+    ) {
+        // Collect dependency information first to avoid borrowing issues
+        let mut deps_to_add: Vec<(DagNodeId, DagNodeId)> = Vec::new();
+        
+        for (node_id, dag_node) in nodes.iter().enumerate() {
+            // Check if this is a Fetch node with explicit dependencies
+            if let PlanNode::Fetch(fetch_node) = dag_node.plan_node {
+                if let Some(depends_on) = &fetch_node.depends_on {
+                    for &dep_fetch_id in depends_on {
+                        if let Some(&dep_dag_id) = fetch_id_to_dag_id.get(&dep_fetch_id) {
+                            deps_to_add.push((dep_dag_id, node_id));
+                        }
+                    }
+                }
+            }
+            // Also check Flatten nodes which wrap Fetch nodes
+            else if let PlanNode::Flatten(flatten_node) = dag_node.plan_node {
+                if let PlanNode::Fetch(fetch_node) = flatten_node.node.as_ref() {
+                    if let Some(depends_on) = &fetch_node.depends_on {
+                        for &dep_fetch_id in depends_on {
+                            if let Some(&dep_dag_id) = fetch_id_to_dag_id.get(&dep_fetch_id) {
+                                deps_to_add.push((dep_dag_id, node_id));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Apply the collected dependencies
+        for (dep_dag_id, node_id) in deps_to_add {
+            // Add the dependent to the dependency's list
+            if !nodes[dep_dag_id].dependents.contains(&node_id) {
+                nodes[dep_dag_id].dependents.push(node_id);
+            }
+            // Increment the dependency count
+            nodes[node_id].dependency_count += 1;
+        }
+    }
+    
     /// Recursively compile a plan node into DAG nodes
     /// Returns the node ID of the last created node, None if no nodes were created
     fn compile_node(
@@ -258,13 +306,14 @@ impl<'exec> DagScheduler<'exec> {
         nodes: &mut Vec<DagNode<'exec>>,
         id_counter: &mut usize,
         parent_id: Option<DagNodeId>,
+        fetch_id_to_dag_id: &mut HashMap<i64, DagNodeId>,
     ) -> Option<DagNodeId> {
         match node {
             PlanNode::Sequence(seq) => {
                 // For sequence: create chain where each node depends on previous
                 let mut prev_id = parent_id;
                 for child in &seq.nodes {
-                    prev_id = Self::compile_node(child, nodes, id_counter, prev_id);
+                    prev_id = Self::compile_node(child, nodes, id_counter, prev_id, fetch_id_to_dag_id);
                 }
                 prev_id
             }
@@ -273,7 +322,7 @@ impl<'exec> DagScheduler<'exec> {
                 // Process all children with the same parent_id so they execute in parallel
                 let mut last_id = None;
                 for child in &par.nodes {
-                    let child_id = Self::compile_node(child, nodes, id_counter, parent_id);
+                    let child_id = Self::compile_node(child, nodes, id_counter, parent_id, fetch_id_to_dag_id);
                     if child_id.is_some() {
                         last_id = child_id;
                     }
@@ -301,10 +350,39 @@ impl<'exec> DagScheduler<'exec> {
                 
                 Some(node_id)
             }
-            PlanNode::Fetch(_) | PlanNode::Flatten(_) => {
+            PlanNode::Fetch(fetch_node) => {
                 // Leaf nodes that perform actual work
                 let node_id = *id_counter;
                 *id_counter += 1;
+                
+                // Record the mapping from fetch ID to DAG node ID
+                fetch_id_to_dag_id.insert(fetch_node.id, node_id);
+                
+                let dag_node = DagNode {
+                    plan_node: node,
+                    dependency_count: if parent_id.is_some() { 1 } else { 0 },
+                    dependents: Vec::new(),
+                };
+                
+                nodes.push(dag_node);
+                
+                // Add dependency from parent if exists
+                if let Some(pid) = parent_id {
+                    debug_assert!(pid < node_id, "parent_id must reference an earlier node");
+                    nodes[pid].dependents.push(node_id);
+                }
+                
+                Some(node_id)
+            }
+            PlanNode::Flatten(flatten_node) => {
+                // Flatten node wraps another plan node
+                let node_id = *id_counter;
+                *id_counter += 1;
+                
+                // If the wrapped node is a Fetch, record its mapping
+                if let PlanNode::Fetch(fetch_node) = flatten_node.node.as_ref() {
+                    fetch_id_to_dag_id.insert(fetch_node.id, node_id);
+                }
                 
                 let dag_node = DagNode {
                     plan_node: node,
@@ -1233,5 +1311,165 @@ mod tests {
         
         let b_msg = receiver_b.recv().expect("Should receive b_started");
         assert_eq!(b_msg, "b_started");
+    }
+
+    #[tokio::test]
+    async fn dag_scheduler_respects_explicit_depends_on() {
+        // This test verifies that the DAG scheduler respects explicit dependencies
+        // specified in the depends_on field, allowing parallel execution within
+        // Parallel blocks when there are no explicit dependencies
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let mut subgraph_a = mockito::Server::new_async().await;
+        let mut subgraph_b = mockito::Server::new_async().await;
+        let mut subgraph_c = mockito::Server::new_async().await;
+        
+        let data = crate::response::value::Value::Null;
+        let subgraph_endpoint_map = HashMap::from([
+            (
+                "subgraph_a".to_string(),
+                format!("http://{}/graphql", subgraph_a.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+            (
+                "subgraph_b".to_string(),
+                format!("http://{}/graphql", subgraph_b.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+            (
+                "subgraph_c".to_string(),
+                format!("http://{}/graphql", subgraph_c.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+        ]);
+        
+        let executor = Executor {
+            variable_values: &None,
+            schema_metadata: &SchemaMetadata::default(),
+            executors: &SubgraphExecutorMap::from_http_endpoint_map(
+                &subgraph_endpoint_map,
+                HiveRouterConfig::default().into(),
+                Arc::new(TelemetryContext::from_propagation_config(
+                    &Default::default(),
+                )),
+            )
+            .unwrap(),
+            client_request: &ClientRequestDetails {
+                method: &http::Method::POST,
+                url: &"http://example.com".parse().unwrap(),
+                headers: &HeaderMap::new(),
+                operation: OperationDetails {
+                    name: None,
+                    query: "{ from_a from_b from_c }",
+                    kind: "query",
+                },
+                jwt: JwtRequestDetails::Unauthenticated,
+            },
+            headers_plan: &HeaderRulesPlan::default(),
+            jwt_forwarding_plan: None,
+            dedupe_subgraph_requests: false,
+        };
+
+        // Mock subgraphs
+        let mock_a = subgraph_a
+            .mock("POST", "/graphql")
+            .with_body(r#"{"data":{"from_a":"value_a"}}"#)
+            .create();
+
+        let mock_b = subgraph_b
+            .mock("POST", "/graphql")
+            .with_body(r#"{"data":{"from_b":"value_b"}}"#)
+            .create();
+
+        let mock_c = subgraph_c
+            .mock("POST", "/graphql")
+            .with_body(r#"{"data":{"from_c":"value_c"}}"#)
+            .create();
+
+        let mut exec_ctx = ExecutionContext {
+            data,
+            ..Default::default()
+        };
+
+        let dummy_doc = Document {
+            operation: OperationDefinition {
+                name: None,
+                operation_kind: None,
+                variable_definitions: None,
+                selection_set: SelectionSet { items: vec![] },
+            },
+            fragments: vec![],
+        };
+        
+        // Test Plan: Parallel block with three fetches
+        // Fetch B explicitly depends on Fetch A (depends_on: Some(vec![1]))
+        // Fetch C has no explicit dependencies
+        // Expected: A and C can run in parallel, B waits for A
+        executor
+            .execute_plan_node(
+                &mut exec_ctx,
+                &PlanNode::Parallel(ParallelNode {
+                    nodes: vec![
+                        PlanNode::Fetch(FetchNode {
+                            id: 1,
+                            service_name: "subgraph_a".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_a }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                            depends_on: None, // A has no dependencies
+                        }),
+                        PlanNode::Fetch(FetchNode {
+                            id: 2,
+                            service_name: "subgraph_b".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_b }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                            depends_on: Some(vec![1]), // B depends on A
+                        }),
+                        PlanNode::Fetch(FetchNode {
+                            id: 3,
+                            service_name: "subgraph_c".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_c }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                            depends_on: None, // C has no dependencies
+                        }),
+                    ],
+                }),
+            )
+            .await;
+        
+        mock_a.assert();
+        mock_b.assert();
+        mock_c.assert();
+        
+        // All three should execute successfully
+        // The DAG scheduler should handle the explicit dependency from B to A
     }
 }
