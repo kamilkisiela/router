@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use bytes::BufMut;
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
@@ -201,58 +201,216 @@ impl<'exec> ExecutionJob<'exec> {
     }
 }
 
-impl<'exec> Executor<'exec> {
-    async fn execute_plan_node(&self, ctx: &mut ExecutionContext<'exec>, node: &'exec PlanNode) {
-        match node {
-            PlanNode::Parallel(parallel_node) => {
-                let mut scope = FuturesUnordered::new();
+/// A unique identifier for a DAG node
+type DagNodeId = usize;
 
-                for child in &parallel_node.nodes {
-                    // We borrow `ctx.data` only for sync preparation of the job future,
-                    // and the actual execution of the job future is done without the borrow of `ctx.data`
-                    if let Some(fut) = self.prepare_job_future(child, &ctx.data) {
-                        scope.push(fut);
+/// Represents a node in the execution DAG
+struct DagNode<'exec> {
+    /// The original plan node to execute
+    plan_node: &'exec PlanNode,
+    /// Number of dependencies that must complete before this node can run
+    dependency_count: usize,
+    /// Nodes that depend on this node (to notify when this completes)
+    dependents: Vec<DagNodeId>,
+}
+
+/// DAG scheduler for parallel execution
+struct DagScheduler<'exec> {
+    /// All nodes in the DAG
+    nodes: Vec<DagNode<'exec>>,
+    /// Current dependency counts (decremented as dependencies complete)
+    remaining_deps: Vec<usize>,
+    /// Queue of nodes ready to execute (have zero dependencies)
+    ready_queue: VecDeque<DagNodeId>,
+}
+
+impl<'exec> DagScheduler<'exec> {
+    /// Compile a PlanNode tree into a DAG
+    fn compile(root: &'exec PlanNode) -> Self {
+        let mut nodes = Vec::new();
+        let mut node_id_counter = 0;
+        
+        // Build DAG from plan tree
+        Self::compile_node(root, &mut nodes, &mut node_id_counter, None);
+        
+        // Initialize remaining dependency counts
+        let remaining_deps = nodes.iter().map(|n| n.dependency_count).collect();
+        
+        // Initialize ready queue with ALL nodes that have no dependencies
+        let mut ready_queue = VecDeque::new();
+        for (node_id, node) in nodes.iter().enumerate() {
+            if node.dependency_count == 0 {
+                ready_queue.push_back(node_id);
+            }
+        }
+        
+        Self {
+            nodes,
+            remaining_deps,
+            ready_queue,
+        }
+    }
+    
+    /// Recursively compile a plan node into DAG nodes
+    /// Returns the node ID of the last created node, None if no nodes were created
+    fn compile_node(
+        node: &'exec PlanNode,
+        nodes: &mut Vec<DagNode<'exec>>,
+        id_counter: &mut usize,
+        parent_id: Option<DagNodeId>,
+    ) -> Option<DagNodeId> {
+        match node {
+            PlanNode::Sequence(seq) => {
+                // For sequence: create chain where each node depends on previous
+                let mut prev_id = parent_id;
+                for child in &seq.nodes {
+                    prev_id = Self::compile_node(child, nodes, id_counter, prev_id);
+                }
+                prev_id
+            }
+            PlanNode::Parallel(par) => {
+                // For parallel: all children depend on parent (if any), but not on each other
+                // Process all children with the same parent_id so they execute in parallel
+                let mut last_id = None;
+                for child in &par.nodes {
+                    let child_id = Self::compile_node(child, nodes, id_counter, parent_id);
+                    if child_id.is_some() {
+                        last_id = child_id;
                     }
                 }
+                last_id
+            }
+            PlanNode::Condition(_cond) => {
+                // Condition nodes need runtime evaluation - treat as a work node
+                let node_id = *id_counter;
+                *id_counter += 1;
+                
+                let dag_node = DagNode {
+                    plan_node: node,
+                    dependency_count: if parent_id.is_some() { 1 } else { 0 },
+                    dependents: Vec::new(),
+                };
+                
+                // Add dependency from parent if exists
+                if let Some(pid) = parent_id {
+                    if pid < nodes.len() {
+                        nodes[pid].dependents.push(node_id);
+                    }
+                }
+                
+                nodes.push(dag_node);
+                Some(node_id)
+            }
+            PlanNode::Fetch(_) | PlanNode::Flatten(_) => {
+                // Leaf nodes that perform actual work
+                let node_id = *id_counter;
+                *id_counter += 1;
+                
+                let dag_node = DagNode {
+                    plan_node: node,
+                    dependency_count: if parent_id.is_some() { 1 } else { 0 },
+                    dependents: Vec::new(),
+                };
+                
+                // Add dependency from parent if exists
+                if let Some(pid) = parent_id {
+                    if pid < nodes.len() {
+                        nodes[pid].dependents.push(node_id);
+                    }
+                }
+                
+                nodes.push(dag_node);
+                Some(node_id)
+            }
+            _ => None, // Subscription, Defer nodes not yet supported in DAG
+        }
+    }
+    
+    /// Mark a node as completed and return newly ready nodes
+    fn complete_node(&mut self, node_id: DagNodeId) -> Vec<DagNodeId> {
+        let mut newly_ready = Vec::new();
+        
+        if node_id >= self.nodes.len() {
+            return newly_ready;
+        }
+        
+        // Notify all dependents
+        for &dependent_id in &self.nodes[node_id].dependents {
+            if dependent_id < self.remaining_deps.len() {
+                self.remaining_deps[dependent_id] -= 1;
+                
+                // If dependent now has zero dependencies, it's ready
+                if self.remaining_deps[dependent_id] == 0 {
+                    newly_ready.push(dependent_id);
+                }
+            }
+        }
+        
+        newly_ready
+    }
+}
 
-                while let Some(job) = scope.next().await {
-                    self.process_job_result(ctx, job);
-                }
+impl<'exec> Executor<'exec> {
+    async fn execute_plan_node(&self, ctx: &mut ExecutionContext<'exec>, node: &'exec PlanNode) {
+        // Compile the plan tree into a DAG
+        let mut scheduler = DagScheduler::compile(node);
+        
+        // Use FuturesUnordered for parallel execution
+        let mut executing = FuturesUnordered::new();
+        // Track which futures correspond to which node IDs
+        let mut future_to_node: HashMap<usize, DagNodeId> = HashMap::new();
+        let mut future_id_counter = 0;
+        
+        // Start executing ready nodes
+        while let Some(ready_node_id) = scheduler.ready_queue.pop_front() {
+            if let Some(fut) = self.prepare_node_future(&scheduler.nodes[ready_node_id].plan_node, &ctx.data) {
+                let future_id = future_id_counter;
+                future_id_counter += 1;
+                future_to_node.insert(future_id, ready_node_id);
+                executing.push(async move { (future_id, fut.await) }.boxed());
+            } else {
+                // Node had no work (e.g., Flatten with no data)
+                // Complete it immediately and check for newly ready nodes
+                let newly_ready = scheduler.complete_node(ready_node_id);
+                scheduler.ready_queue.extend(newly_ready);
             }
-            PlanNode::Sequence(sequence_node) => {
-                for child in &sequence_node.nodes {
-                    // We use `Box.pin` here to avoid the compiler error about recursive future,
-                    // as `execute_plan_node` is calling itself recursively for sequence nodes
-                    Box::pin(self.execute_plan_node(ctx, child)).await;
-                }
-            }
-            PlanNode::Condition(condition_node) => {
-                if let Some(next_node) =
-                    condition_node_by_variables(condition_node, self.variable_values)
-                {
-                    // We use `Box.pin` here to avoid the compiler error about recursive future,
-                    // as `execute_plan_node` is calling itself recursively for condition nodes
-                    Box::pin(self.execute_plan_node(ctx, next_node)).await;
-                }
-            }
-            node => {
-                if let Some(fut) = self.prepare_job_future(node, &ctx.data) {
-                    let job = fut.await;
-                    self.process_job_result(ctx, job);
+        }
+        
+        // Process completions and launch newly ready nodes
+        while let Some((future_id, job_result)) = executing.next().await {
+            // Process the completed job
+            self.process_job_result(ctx, job_result);
+            
+            // Mark node as complete and get newly ready nodes
+            if let Some(&node_id) = future_to_node.get(&future_id) {
+                let newly_ready = scheduler.complete_node(node_id);
+                
+                // Launch newly ready nodes
+                for ready_node_id in newly_ready {
+                    if let Some(fut) = self.prepare_node_future(&scheduler.nodes[ready_node_id].plan_node, &ctx.data) {
+                        let new_future_id = future_id_counter;
+                        future_id_counter += 1;
+                        future_to_node.insert(new_future_id, ready_node_id);
+                        executing.push(async move { (new_future_id, fut.await) }.boxed());
+                    } else {
+                        // Node had no work, complete it immediately
+                        let more_ready = scheduler.complete_node(ready_node_id);
+                        for rid in more_ready {
+                            if let Some(fut) = self.prepare_node_future(&scheduler.nodes[rid].plan_node, &ctx.data) {
+                                let new_future_id = future_id_counter;
+                                future_id_counter += 1;
+                                future_to_node.insert(new_future_id, rid);
+                                executing.push(async move { (new_future_id, fut.await) }.boxed());
+                            }
+                        }
+                    }
                 }
             }
         }
     }
-
-    /**
-     * This function is sync, because we only need the immutable borrow of `ctx.data` to prepare the subgraph request,
-     * and the actual execution of the subgraph request is done in `prepare_fetch_job` which is async.
-     * So we do everything in sync with `ctx.data` and return a future for the actual execution of the subgraph request.
-     *
-     * The return type is not a future of `Option`, but `Option` of future because the only case when we don't have a future,
-     * and the result(`None`) is when the plan node is flatten node with no data.
-     */
-    fn prepare_job_future<'wave>(
+    
+    /// Prepare a future for a single plan node (non-recursive)
+    fn prepare_node_future<'wave>(
         &'wave self,
         node: &'exec PlanNode,
         data: &Value<'exec>,
@@ -262,91 +420,106 @@ impl<'exec> Executor<'exec> {
                 Some(self.prepare_fetch_job(fetch_node, None, None).boxed())
             }
             PlanNode::Flatten(flatten_node) => {
-                let fetch_node = match flatten_node.node.as_ref() {
-                    PlanNode::Fetch(fetch_node) => fetch_node,
-                    _ => return None,
-                };
-                let requires_nodes = fetch_node.requires.as_ref()?;
-
-                let mut index = 0;
-                let normalized_path = flatten_node.path.as_slice();
-                let mut filtered_representations = Vec::new();
-                filtered_representations.put(OPEN_BRACKET);
-                let possible_types = &self.schema_metadata.possible_types;
-                let mut representation_hashes: Vec<u64> = Vec::new();
-                let mut representation_hash_to_index: HashMap<u64, usize> = HashMap::new();
-                let arena = bumpalo::Bump::new();
-
-                traverse_and_callback(data, normalized_path, self.schema_metadata, &mut |entity| {
-                    let hash = entity.to_hash(&requires_nodes.items, possible_types);
-
-                    if !entity.is_null() {
-                        representation_hashes.push(hash);
-                    }
-
-                    if representation_hash_to_index.contains_key(&hash) {
-                        return;
-                    }
-
-                    let entity = if let Some(input_rewrites) = &fetch_node.input_rewrites {
-                        let new_entity = arena.alloc(entity.clone());
-                        for input_rewrite in input_rewrites {
-                            input_rewrite.rewrite(&self.schema_metadata.possible_types, new_entity);
-                        }
-                        new_entity
-                    } else {
-                        entity
-                    };
-
-                    let is_projected = project_requires(
-                        possible_types,
-                        &requires_nodes.items,
-                        entity,
-                        &mut filtered_representations,
-                        representation_hash_to_index.is_empty(),
-                        None,
-                    );
-
-                    if is_projected {
-                        representation_hash_to_index.insert(hash, index);
-                    }
-
-                    index += 1;
-                });
-
-                filtered_representations.put(CLOSE_BRACKET);
-
-                if representation_hash_to_index.is_empty() {
-                    return None;
-                }
-
-                // This is the future for the actual fetch job
-                Some(
-                    async {
-                        let fetch_job = self
-                            .prepare_fetch_job(
-                                fetch_node,
-                                Some(filtered_representations),
-                                Some(&flatten_node.path),
-                            )
-                            .await?;
-                        Ok(ExecutionJob::FlattenFetch {
-                            flatten_node_path: &flatten_node.path,
-                            response: fetch_job.response(),
-                            fetch_node_id: fetch_node.id,
-                            subgraph_name: fetch_node.service_name.as_str(),
-                            representation_hashes,
-                            representation_hash_to_index,
-                        })
-                    }
-                    .boxed(),
-                )
+                self.prepare_flatten_job(flatten_node, data)
             }
-            PlanNode::Condition(node) => condition_node_by_variables(node, self.variable_values)
-                .and_then(|node| self.prepare_job_future(node, data)),
-            // Our Query Planner does not produce any other plan node types in ParallelNode
+            PlanNode::Condition(condition_node) => {
+                // Evaluate condition and prepare the selected branch
+                if let Some(selected_node) = condition_node_by_variables(condition_node, self.variable_values) {
+                    self.prepare_node_future(selected_node, data)
+                } else {
+                    None
+                }
+            }
+            // Sequence and Parallel should have been decomposed by compile_node
             _ => None,
         }
+    }
+    
+    /// Prepare a job for a Flatten node
+    fn prepare_flatten_job<'wave>(
+        &'wave self,
+        flatten_node: &'exec hive_router_query_planner::planner::plan_nodes::FlattenNode,
+        data: &Value<'exec>,
+    ) -> Option<BoxFuture<'wave, Result<ExecutionJob<'exec>, PlanExecutionError>>> {
+        let fetch_node = match flatten_node.node.as_ref() {
+            PlanNode::Fetch(fetch_node) => fetch_node,
+            _ => return None,
+        };
+        let requires_nodes = fetch_node.requires.as_ref()?;
+
+        let mut index = 0;
+        let normalized_path = flatten_node.path.as_slice();
+        let mut filtered_representations = Vec::new();
+        filtered_representations.put(OPEN_BRACKET);
+        let possible_types = &self.schema_metadata.possible_types;
+        let mut representation_hashes: Vec<u64> = Vec::new();
+        let mut representation_hash_to_index: HashMap<u64, usize> = HashMap::new();
+        let arena = bumpalo::Bump::new();
+
+        traverse_and_callback(data, normalized_path, self.schema_metadata, &mut |entity| {
+            let hash = entity.to_hash(&requires_nodes.items, possible_types);
+
+            if !entity.is_null() {
+                representation_hashes.push(hash);
+            }
+
+            if representation_hash_to_index.contains_key(&hash) {
+                return;
+            }
+
+            let entity = if let Some(input_rewrites) = &fetch_node.input_rewrites {
+                let new_entity = arena.alloc(entity.clone());
+                for input_rewrite in input_rewrites {
+                    input_rewrite.rewrite(&self.schema_metadata.possible_types, new_entity);
+                }
+                new_entity
+            } else {
+                entity
+            };
+
+            let is_projected = project_requires(
+                possible_types,
+                &requires_nodes.items,
+                entity,
+                &mut filtered_representations,
+                representation_hash_to_index.is_empty(),
+                None,
+            );
+
+            if is_projected {
+                representation_hash_to_index.insert(hash, index);
+            }
+
+            index += 1;
+        });
+
+        filtered_representations.put(CLOSE_BRACKET);
+
+        if representation_hash_to_index.is_empty() {
+            return None;
+        }
+
+        // This is the future for the actual fetch job
+        Some(
+            async {
+                let fetch_job = self
+                    .prepare_fetch_job(
+                        fetch_node,
+                        Some(filtered_representations),
+                        Some(&flatten_node.path),
+                    )
+                    .await?;
+                Ok(ExecutionJob::FlattenFetch {
+                    flatten_node_path: &flatten_node.path,
+                    response: fetch_job.response(),
+                    fetch_node_id: fetch_node.id,
+                    subgraph_name: fetch_node.service_name.as_str(),
+                    representation_hashes,
+                    representation_hash_to_index,
+                })
+            }
+            .boxed(),
+        )
     }
 
     // We handle `Result` instead of passing `PlanExecutionError` directly
