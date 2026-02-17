@@ -291,14 +291,14 @@ impl<'exec> DagScheduler<'exec> {
                     dependents: Vec::new(),
                 };
                 
+                nodes.push(dag_node);
+                
                 // Add dependency from parent if exists
                 if let Some(pid) = parent_id {
-                    if pid < nodes.len() {
-                        nodes[pid].dependents.push(node_id);
-                    }
+                    debug_assert!(pid < nodes.len(), "parent_id must reference an existing node");
+                    nodes[pid].dependents.push(node_id);
                 }
                 
-                nodes.push(dag_node);
                 Some(node_id)
             }
             PlanNode::Fetch(_) | PlanNode::Flatten(_) => {
@@ -312,17 +312,18 @@ impl<'exec> DagScheduler<'exec> {
                     dependents: Vec::new(),
                 };
                 
+                nodes.push(dag_node);
+                
                 // Add dependency from parent if exists
                 if let Some(pid) = parent_id {
-                    if pid < nodes.len() {
-                        nodes[pid].dependents.push(node_id);
-                    }
+                    debug_assert!(pid < nodes.len(), "parent_id must reference an existing node");
+                    nodes[pid].dependents.push(node_id);
                 }
                 
-                nodes.push(dag_node);
                 Some(node_id)
             }
-            _ => None, // Subscription, Defer nodes not yet supported in DAG
+            // Subscription and Defer nodes not yet supported
+            PlanNode::Subscription(_) | PlanNode::Defer(_) => None,
         }
     }
     
@@ -363,17 +364,14 @@ impl<'exec> Executor<'exec> {
         
         // Start executing ready nodes
         while let Some(ready_node_id) = scheduler.ready_queue.pop_front() {
-            if let Some(fut) = self.prepare_node_future(&scheduler.nodes[ready_node_id].plan_node, &ctx.data) {
-                let future_id = future_id_counter;
-                future_id_counter += 1;
-                future_to_node.insert(future_id, ready_node_id);
-                executing.push(async move { (future_id, fut.await) }.boxed());
-            } else {
-                // Node had no work (e.g., Flatten with no data)
-                // Complete it immediately and check for newly ready nodes
-                let newly_ready = scheduler.complete_node(ready_node_id);
-                scheduler.ready_queue.extend(newly_ready);
-            }
+            self.handle_ready_node(
+                &mut scheduler,
+                &ctx.data,
+                &mut executing,
+                &mut future_to_node,
+                &mut future_id_counter,
+                ready_node_id,
+            );
         }
         
         // Process completions and launch newly ready nodes
@@ -387,22 +385,52 @@ impl<'exec> Executor<'exec> {
                 
                 // Launch newly ready nodes
                 for ready_node_id in newly_ready {
-                    if let Some(fut) = self.prepare_node_future(&scheduler.nodes[ready_node_id].plan_node, &ctx.data) {
-                        let new_future_id = future_id_counter;
-                        future_id_counter += 1;
-                        future_to_node.insert(new_future_id, ready_node_id);
-                        executing.push(async move { (new_future_id, fut.await) }.boxed());
+                    self.handle_ready_node(
+                        &mut scheduler,
+                        &ctx.data,
+                        &mut executing,
+                        &mut future_to_node,
+                        &mut future_id_counter,
+                        ready_node_id,
+                    );
+                }
+            }
+        }
+    }
+    
+    /// Handle a ready node: either spawn it for execution or complete it immediately if no work
+    fn handle_ready_node<'a>(
+        &'a self,
+        scheduler: &mut DagScheduler<'exec>,
+        data: &Value<'exec>,
+        executing: &mut FuturesUnordered<BoxFuture<'a, (usize, Result<ExecutionJob<'exec>, PlanExecutionError>)>>,
+        future_to_node: &mut HashMap<usize, DagNodeId>,
+        future_id_counter: &mut usize,
+        ready_node_id: DagNodeId,
+    ) {
+        if let Some(fut) = self.prepare_node_future(&scheduler.nodes[ready_node_id].plan_node, data) {
+            // Node has work - spawn it for execution
+            let future_id = *future_id_counter;
+            *future_id_counter += 1;
+            future_to_node.insert(future_id, ready_node_id);
+            executing.push(async move { (future_id, fut.await) }.boxed());
+        } else {
+            // Node had no work (e.g., Flatten with no data)
+            // Complete it immediately and recursively process newly ready nodes
+            let mut to_process = vec![ready_node_id];
+            while let Some(nid) = to_process.pop() {
+                let newly_ready = scheduler.complete_node(nid);
+                
+                for rid in newly_ready {
+                    if let Some(fut) = self.prepare_node_future(&scheduler.nodes[rid].plan_node, data) {
+                        // Node has work - spawn it for execution
+                        let future_id = *future_id_counter;
+                        *future_id_counter += 1;
+                        future_to_node.insert(future_id, rid);
+                        executing.push(async move { (future_id, fut.await) }.boxed());
                     } else {
-                        // Node had no work, complete it immediately
-                        let more_ready = scheduler.complete_node(ready_node_id);
-                        for rid in more_ready {
-                            if let Some(fut) = self.prepare_node_future(&scheduler.nodes[rid].plan_node, &ctx.data) {
-                                let new_future_id = future_id_counter;
-                                future_id_counter += 1;
-                                future_to_node.insert(new_future_id, rid);
-                                executing.push(async move { (new_future_id, fut.await) }.boxed());
-                            }
-                        }
+                        // This node also has no work, add to processing stack
+                        to_process.push(rid);
                     }
                 }
             }
