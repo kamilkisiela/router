@@ -108,6 +108,9 @@ pub struct FetchNode {
     pub input_rewrites: Option<Vec<FetchRewrite>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_rewrites: Option<Vec<FetchRewrite>>,
+    /// Explicit dependencies: IDs of fetch nodes that must complete before this one
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -405,6 +408,7 @@ impl FetchNode {
                 requires: Some(create_input_selection_set(&step.input)),
                 input_rewrites: step.input_rewrites.clone(),
                 output_rewrites: step.output_rewrites.clone(),
+                depends_on: None, // TODO: Populate from fetch graph dependencies
             },
             false => {
                 let operation_def = OperationDefinition {
@@ -432,6 +436,7 @@ impl FetchNode {
                     requires: None,
                     input_rewrites: step.input_rewrites.clone(),
                     output_rewrites: step.output_rewrites.clone(),
+                    depends_on: None, // TODO: Populate from fetch graph dependencies
                 }
             }
         }

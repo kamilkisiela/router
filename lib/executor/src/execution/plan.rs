@@ -1062,6 +1062,7 @@ mod tests {
                             output_rewrites: None,
                             variable_usages: None,
                             operation_kind: None,
+                            depends_on: None,
                         }),
                         PlanNode::Fetch(FetchNode {
                             id: 2,
@@ -1077,6 +1078,7 @@ mod tests {
                             output_rewrites: None,
                             variable_usages: None,
                             operation_kind: None,
+                            depends_on: None,
                         }),
                     ],
                 }),
@@ -1199,6 +1201,7 @@ mod tests {
                             output_rewrites: None,
                             variable_usages: None,
                             operation_kind: None,
+                            depends_on: None,
                         }),
                         PlanNode::Fetch(FetchNode {
                             id: 2,
@@ -1214,6 +1217,7 @@ mod tests {
                             output_rewrites: None,
                             variable_usages: None,
                             operation_kind: None,
+                            depends_on: None,
                         }),
                     ],
                 }),
