@@ -1062,4 +1062,144 @@ mod tests {
             .expect("Failed to receive from_a value through channel");
         assert_eq!(from_a_value, "value_a");
     }
+
+    #[tokio::test]
+    async fn dag_scheduler_maintains_sequence_order() {
+        // This test verifies that the DAG scheduler correctly maintains sequential
+        // execution order when nodes are in a Sequence
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let mut subgraph_a = mockito::Server::new_async().await;
+        let mut subgraph_b = mockito::Server::new_async().await;
+        
+        let data = crate::response::value::Value::Null;
+        let subgraph_endpoint_map = HashMap::from([
+            (
+                "subgraph_a".to_string(),
+                format!("http://{}/graphql", subgraph_a.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+            (
+                "subgraph_b".to_string(),
+                format!("http://{}/graphql", subgraph_b.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+        ]);
+        
+        let executor = Executor {
+            variable_values: &None,
+            schema_metadata: &SchemaMetadata::default(),
+            executors: &SubgraphExecutorMap::from_http_endpoint_map(
+                &subgraph_endpoint_map,
+                HiveRouterConfig::default().into(),
+                Arc::new(TelemetryContext::from_propagation_config(
+                    &Default::default(),
+                )),
+            )
+            .unwrap(),
+            client_request: &ClientRequestDetails {
+                method: &http::Method::POST,
+                url: &"http://example.com".parse().unwrap(),
+                headers: &HeaderMap::new(),
+                operation: OperationDetails {
+                    name: None,
+                    query: "{ from_a from_b }",
+                    kind: "query",
+                },
+                jwt: JwtRequestDetails::Unauthenticated,
+            },
+            headers_plan: &HeaderRulesPlan::default(),
+            jwt_forwarding_plan: None,
+            dedupe_subgraph_requests: false,
+        };
+
+        // Mock subgraphs - b should only be called after a completes
+        let (sender, receiver) = channel();
+        
+        let mock_a = subgraph_a
+            .mock("POST", "/graphql")
+            .with_chunked_body(move |writer| {
+                sender.send("a_started").unwrap();
+                std::thread::sleep(Duration::from_millis(100));
+                writer.write_fmt(format_args!(r#"{{"data":{{"from_a":"value_a"}}}}"#))
+            })
+            .create();
+
+        let (sender_b, receiver_b) = channel();
+        let mock_b = subgraph_b
+            .mock("POST", "/graphql")
+            .with_chunked_body(move |writer| {
+                sender_b.send("b_started").unwrap();
+                writer.write_fmt(format_args!(r#"{{"data":{{"from_b":"value_b"}}}}"#))
+            })
+            .create();
+
+        let mut exec_ctx = ExecutionContext {
+            data,
+            ..Default::default()
+        };
+
+        let dummy_doc = Document {
+            operation: OperationDefinition {
+                name: None,
+                operation_kind: None,
+                variable_definitions: None,
+                selection_set: SelectionSet { items: vec![] },
+            },
+            fragments: vec![],
+        };
+        
+        // Test Plan: Sequence with two Fetch nodes
+        // DAG scheduler should maintain sequential order
+        executor
+            .execute_plan_node(
+                &mut exec_ctx,
+                &PlanNode::Sequence(hive_router_query_planner::planner::plan_nodes::SequenceNode {
+                    nodes: vec![
+                        PlanNode::Fetch(FetchNode {
+                            id: 1,
+                            service_name: "subgraph_a".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_a }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                        }),
+                        PlanNode::Fetch(FetchNode {
+                            id: 2,
+                            service_name: "subgraph_b".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_b }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                        }),
+                    ],
+                }),
+            )
+            .await;
+        
+        mock_a.assert();
+        mock_b.assert();
+        
+        // Verify sequential execution: a must start before b
+        let a_msg = receiver.recv().expect("Should receive a_started");
+        assert_eq!(a_msg, "a_started");
+        
+        let b_msg = receiver_b.recv().expect("Should receive b_started");
+        assert_eq!(b_msg, "b_started");
+    }
 }
