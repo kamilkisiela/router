@@ -449,6 +449,9 @@ fn interface_object_with_inline_fragment_resolving_remote_interface_field(
                     "setValueTo": "NodeWithName"
                   }
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -495,6 +498,9 @@ fn interface_object_with_inline_fragment_resolving_remote_interface_field(
                     "setValueTo": "NodeWithName"
                   }
                 }
+              ],
+              "dependsOn": [
+                6
               ]
             }
           }

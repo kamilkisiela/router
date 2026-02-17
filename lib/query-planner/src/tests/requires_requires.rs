@@ -110,6 +110,9 @@ fn one() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -144,6 +147,9 @@ fn one() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                7
               ]
             }
           }
@@ -262,6 +268,9 @@ fn one_with_one_local() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -296,6 +305,9 @@ fn one_with_one_local() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                7
               ]
             }
           }
@@ -414,6 +426,9 @@ fn two_fields_with_the_same_requirements() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -448,6 +463,9 @@ fn two_fields_with_the_same_requirements() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                7
               ]
             }
           }
@@ -574,6 +592,9 @@ fn one_more() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -608,6 +629,9 @@ fn one_more() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                9
               ]
             }
           },
@@ -642,6 +666,9 @@ fn one_more() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                7
               ]
             }
           }
@@ -770,6 +797,9 @@ fn another_two_fields_with_the_same_requirements() -> Result<(), Box<dyn Error>>
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -804,6 +834,9 @@ fn another_two_fields_with_the_same_requirements() -> Result<(), Box<dyn Error>>
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                15
               ]
             }
           },
@@ -838,6 +871,9 @@ fn another_two_fields_with_the_same_requirements() -> Result<(), Box<dyn Error>>
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                7
               ]
             }
           }
@@ -993,6 +1029,9 @@ fn two_fields() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    2
                   ]
                 }
               },
@@ -1023,6 +1062,9 @@ fn two_fields() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    2
                   ]
                 }
               }
@@ -1059,6 +1101,9 @@ fn two_fields() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                15
               ]
             }
           },
@@ -1097,6 +1142,10 @@ fn two_fields() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                13,
+                7
               ]
             }
           }
@@ -1252,6 +1301,9 @@ fn two_fields_same_requirement_different_order() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    2
                   ]
                 }
               },
@@ -1282,6 +1334,9 @@ fn two_fields_same_requirement_different_order() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    2
                   ]
                 }
               }
@@ -1318,6 +1373,9 @@ fn two_fields_same_requirement_different_order() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                18
               ]
             }
           },
@@ -1356,6 +1414,10 @@ fn two_fields_same_requirement_different_order() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                10,
+                7
               ]
             }
           }
@@ -1520,6 +1582,9 @@ fn many() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    2
                   ]
                 }
               },
@@ -1550,6 +1615,9 @@ fn many() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    2
                   ]
                 }
               }
@@ -1586,6 +1654,9 @@ fn many() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                23
               ]
             }
           },
@@ -1624,6 +1695,10 @@ fn many() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                8,
+                5
               ]
             }
           }

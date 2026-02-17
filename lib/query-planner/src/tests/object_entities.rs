@@ -108,6 +108,9 @@ fn testing() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -138,6 +141,9 @@ fn testing() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                5
               ]
             }
           }
@@ -247,6 +253,9 @@ fn parent_entity_call() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           }
@@ -388,6 +397,9 @@ fn parent_entity_call_complex() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    2
                   ]
                 }
               },
@@ -418,6 +430,9 @@ fn parent_entity_call_complex() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    2
                   ]
                 }
               }
@@ -453,6 +468,9 @@ fn parent_entity_call_complex() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                3
               ]
             }
           }
@@ -584,6 +602,9 @@ fn complex_entity_call() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -636,6 +657,9 @@ fn complex_entity_call() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                4
               ]
             }
           }

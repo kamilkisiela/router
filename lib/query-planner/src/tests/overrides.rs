@@ -154,6 +154,9 @@ fn two_fields_simple_overrides() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           }

@@ -100,6 +100,9 @@ fn mutations() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           }
