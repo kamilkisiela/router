@@ -295,7 +295,7 @@ impl<'exec> DagScheduler<'exec> {
                 
                 // Add dependency from parent if exists
                 if let Some(pid) = parent_id {
-                    debug_assert!(pid < nodes.len(), "parent_id must reference an existing node");
+                    debug_assert!(pid < node_id, "parent_id must reference an earlier node");
                     nodes[pid].dependents.push(node_id);
                 }
                 
@@ -316,7 +316,7 @@ impl<'exec> DagScheduler<'exec> {
                 
                 // Add dependency from parent if exists
                 if let Some(pid) = parent_id {
-                    debug_assert!(pid < nodes.len(), "parent_id must reference an existing node");
+                    debug_assert!(pid < node_id, "parent_id must reference an earlier node");
                     nodes[pid].dependents.push(node_id);
                 }
                 
@@ -358,8 +358,8 @@ impl<'exec> Executor<'exec> {
         
         // Use FuturesUnordered for parallel execution
         let mut executing = FuturesUnordered::new();
-        // Track which futures correspond to which node IDs
-        let mut future_to_node: HashMap<usize, DagNodeId> = HashMap::new();
+        // Track which futures correspond to which node IDs using a Vec for O(1) access
+        let mut future_to_node: Vec<DagNodeId> = Vec::new();
         let mut future_id_counter = 0;
         
         // Start executing ready nodes
@@ -380,7 +380,7 @@ impl<'exec> Executor<'exec> {
             self.process_job_result(ctx, job_result);
             
             // Mark node as complete and get newly ready nodes
-            if let Some(&node_id) = future_to_node.get(&future_id) {
+            if let Some(&node_id) = future_to_node.get(future_id) {
                 let newly_ready = scheduler.complete_node(node_id);
                 
                 // Launch newly ready nodes
@@ -404,7 +404,7 @@ impl<'exec> Executor<'exec> {
         scheduler: &mut DagScheduler<'exec>,
         data: &Value<'exec>,
         executing: &mut FuturesUnordered<BoxFuture<'a, (usize, Result<ExecutionJob<'exec>, PlanExecutionError>)>>,
-        future_to_node: &mut HashMap<usize, DagNodeId>,
+        future_to_node: &mut Vec<DagNodeId>,
         future_id_counter: &mut usize,
         ready_node_id: DagNodeId,
     ) {
@@ -412,7 +412,7 @@ impl<'exec> Executor<'exec> {
             // Node has work - spawn it for execution
             let future_id = *future_id_counter;
             *future_id_counter += 1;
-            future_to_node.insert(future_id, ready_node_id);
+            future_to_node.push(ready_node_id);
             executing.push(async move { (future_id, fut.await) }.boxed());
         } else {
             // Node had no work (e.g., Flatten with no data)
@@ -426,7 +426,7 @@ impl<'exec> Executor<'exec> {
                         // Node has work - spawn it for execution
                         let future_id = *future_id_counter;
                         *future_id_counter += 1;
-                        future_to_node.insert(future_id, rid);
+                        future_to_node.push(rid);
                         executing.push(async move { (future_id, fut.await) }.boxed());
                     } else {
                         // This node also has no work, add to processing stack
