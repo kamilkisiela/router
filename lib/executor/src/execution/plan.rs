@@ -201,7 +201,7 @@ impl<'exec> ExecutionJob<'exec> {
     }
 }
 
-/// A unique identifier for a DAG node.
+/// A unique identifier for a DAG node
 type DagNodeId = usize;
 
 /// Represents a node in the execution DAG
