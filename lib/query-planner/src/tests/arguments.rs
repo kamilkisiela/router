@@ -149,6 +149,9 @@ fn fed_audit_requires_with_argument_conflict() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    2
                   ]
                 }
               },
@@ -188,6 +191,9 @@ fn fed_audit_requires_with_argument_conflict() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    2
                   ]
                 }
               }
@@ -336,6 +342,9 @@ fn requires_arguments_deeply_nested_requires() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -371,6 +380,9 @@ fn requires_arguments_deeply_nested_requires() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                5
               ]
             }
           },
@@ -413,6 +425,9 @@ fn requires_arguments_deeply_nested_requires() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                6
               ]
             }
           }
@@ -561,6 +576,9 @@ fn requires_arguments_deeply_nested_requires_with_variable() -> Result<(), Box<d
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -596,6 +614,9 @@ fn requires_arguments_deeply_nested_requires_with_variable() -> Result<(), Box<d
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                5
               ]
             }
           },
@@ -638,6 +659,9 @@ fn requires_arguments_deeply_nested_requires_with_variable() -> Result<(), Box<d
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                6
               ]
             }
           }
@@ -797,6 +821,9 @@ fn requires_arguments_deeply_nested_requires_with_variables_and_fragments(
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -832,6 +859,9 @@ fn requires_arguments_deeply_nested_requires_with_variables_and_fragments(
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                5
               ]
             }
           },
@@ -874,6 +904,9 @@ fn requires_arguments_deeply_nested_requires_with_variables_and_fragments(
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                6
               ]
             }
           }
@@ -1011,6 +1044,9 @@ fn multiple_requires_with_args_that_conflicts() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -1049,6 +1085,9 @@ fn multiple_requires_with_args_that_conflicts() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    5
                   ]
                 }
               },
@@ -1083,6 +1122,9 @@ fn multiple_requires_with_args_that_conflicts() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    5
                   ]
                 }
               }
@@ -1224,6 +1266,9 @@ fn multiple_plain_field_and_requires_with_args_that_conflicts() -> Result<(), Bo
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -1262,6 +1307,9 @@ fn multiple_plain_field_and_requires_with_args_that_conflicts() -> Result<(), Bo
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    5
                   ]
                 }
               },
@@ -1297,6 +1345,9 @@ fn multiple_plain_field_and_requires_with_args_that_conflicts() -> Result<(), Bo
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    5
                   ]
                 }
               }
@@ -1417,6 +1468,9 @@ fn multiple_plain_field_and_requires_with_args_that_does_not_conflicts_should_me
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -1451,6 +1505,9 @@ fn multiple_plain_field_and_requires_with_args_that_does_not_conflicts_should_me
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                5
               ]
             }
           }
@@ -1564,6 +1621,9 @@ fn simple_requires_arguments() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -1598,6 +1658,9 @@ fn simple_requires_arguments() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                5
               ]
             }
           }
@@ -2179,6 +2242,9 @@ fn arguments_variables_mixed() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    2
                   ]
                 }
               },
@@ -2209,6 +2275,9 @@ fn arguments_variables_mixed() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    2
                   ]
                 }
               },
@@ -2239,6 +2308,9 @@ fn arguments_variables_mixed() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    2
                   ]
                 }
               },
@@ -2269,6 +2341,9 @@ fn arguments_variables_mixed() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    2
                   ]
                 }
               }
@@ -2307,6 +2382,9 @@ fn arguments_variables_mixed() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    6
                   ]
                 }
               },
@@ -2340,6 +2418,9 @@ fn arguments_variables_mixed() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    3
                   ]
                 }
               }

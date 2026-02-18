@@ -122,6 +122,9 @@ fn simple_requires_provides() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -159,6 +162,9 @@ fn simple_requires_provides() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                3
               ]
             }
           }

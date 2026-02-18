@@ -257,6 +257,9 @@ fn override_with_requires_many() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    20
                   ]
                 }
               },
@@ -291,6 +294,9 @@ fn override_with_requires_many() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    11
                   ]
                 }
               },
@@ -325,6 +331,9 @@ fn override_with_requires_many() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    11
                   ]
                 }
               },
@@ -355,6 +364,9 @@ fn override_with_requires_many() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    2
                   ]
                 }
               }
@@ -394,6 +406,9 @@ fn override_with_requires_many() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    25
                   ]
                 }
               },
@@ -428,6 +443,9 @@ fn override_with_requires_many() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    25
                   ]
                 }
               },
@@ -462,6 +480,9 @@ fn override_with_requires_many() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    6
                   ]
                 }
               },
@@ -496,6 +517,9 @@ fn override_with_requires_many() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    6
                   ]
                 }
               }
@@ -608,6 +632,9 @@ fn override_with_requires_cname_in_c() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -642,6 +669,9 @@ fn override_with_requires_cname_in_c() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                5
               ]
             }
           }
@@ -752,6 +782,9 @@ fn override_with_requires_cname_in_a() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -786,6 +819,9 @@ fn override_with_requires_cname_in_a() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                6
               ]
             }
           }
@@ -896,6 +932,9 @@ fn override_with_requires_aname_in_a() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -930,6 +969,9 @@ fn override_with_requires_aname_in_a() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                5
               ]
             }
           }

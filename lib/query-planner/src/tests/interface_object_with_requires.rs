@@ -124,6 +124,9 @@ fn interface_object_requiring_interface_fields() -> Result<(), Box<dyn Error>> {
                     "setValueTo": "NodeWithName"
                   }
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -174,6 +177,9 @@ fn interface_object_requiring_interface_fields() -> Result<(), Box<dyn Error>> {
                     "setValueTo": "NodeWithName"
                   }
                 }
+              ],
+              "dependsOn": [
+                6
               ]
             }
           }
@@ -310,6 +316,9 @@ fn interface_field_from_remote_graph_with_requires() -> Result<(), Box<dyn Error
                     "setValueTo": "NodeWithName"
                   }
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           }
@@ -428,6 +437,9 @@ fn inline_fragment_on_interface_object_for_remote_type_field() -> Result<(), Box
                     "setValueTo": "NodeWithName"
                   }
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           }
@@ -620,6 +632,9 @@ fn interface_object_field_with_requires_and_inline_fragment() -> Result<(), Box<
                     "setValueTo": "NodeWithName"
                   }
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -670,6 +685,9 @@ fn interface_object_field_with_requires_and_inline_fragment() -> Result<(), Box<
                     "setValueTo": "NodeWithName"
                   }
                 }
+              ],
+              "dependsOn": [
+                6
               ]
             }
           }
@@ -821,6 +839,9 @@ fn interface_field_from_remote_graph_with_requires_and_inline_fragment(
                     "setValueTo": "NodeWithName"
                   }
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           }

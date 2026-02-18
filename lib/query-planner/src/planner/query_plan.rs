@@ -112,7 +112,29 @@ pub fn build_query_plan_from_fetch_graph(
                 )))?;
 
             let step_data = fetch_graph.get_step_data(step_index)?;
-            current_wave_nodes.push(PlanNode::from_fetch_step(step_data, supergraph));
+            
+            // Collect parent dependencies from fetch graph
+            let mut depends_on: Vec<i64> = Vec::new();
+            for parent_edge in fetch_graph.parents_of(step_index) {
+                let parent_index = parent_edge.source();
+                // Skip the root node - it's not a real fetch operation
+                if parent_index != root_index {
+                    if let Ok(parent_data) = fetch_graph.get_step_data(parent_index) {
+                        depends_on.push(parent_data.id);
+                    }
+                }
+            }
+            let depends_on = if depends_on.is_empty() {
+                None
+            } else {
+                Some(depends_on)
+            };
+            
+            current_wave_nodes.push(PlanNode::from_fetch_step_with_deps(
+                step_data,
+                supergraph,
+                depends_on,
+            ));
             planned_nodes_count += 1;
             in_degrees.mark_as_processed(step_index);
 

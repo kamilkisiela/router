@@ -125,6 +125,9 @@ fn two_same_service_calls_with_args_conflicts() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -164,6 +167,9 @@ fn two_same_service_calls_with_args_conflicts() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    5
                   ]
                 }
               },
@@ -199,6 +205,9 @@ fn two_same_service_calls_with_args_conflicts() -> Result<(), Box<dyn Error>> {
                         }
                       ]
                     }
+                  ],
+                  "dependsOn": [
+                    5
                   ]
                 }
               }
@@ -312,6 +321,9 @@ fn two_same_service_calls() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -347,6 +359,9 @@ fn two_same_service_calls() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                5
               ]
             }
           }
@@ -448,6 +463,9 @@ fn simplest_requires() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           }
@@ -551,6 +569,9 @@ fn simplest_requires_with_local_sibling() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           }
@@ -656,6 +677,9 @@ fn simple_requires() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           }
@@ -765,6 +789,9 @@ fn two_fields_same_subgraph_same_requirement() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           }
@@ -876,6 +903,9 @@ fn simple_requires_with_child() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           }
@@ -1003,6 +1033,9 @@ fn keys_mashup() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           },
@@ -1055,6 +1088,9 @@ fn keys_mashup() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                6
               ]
             }
           }

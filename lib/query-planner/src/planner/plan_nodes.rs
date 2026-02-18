@@ -108,6 +108,9 @@ pub struct FetchNode {
     pub input_rewrites: Option<Vec<FetchRewrite>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_rewrites: Option<Vec<FetchRewrite>>,
+    /// Explicit dependencies: IDs of fetch nodes that must complete before this one
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,6 +397,14 @@ impl From<&FetchStepData> for OperationKind {
 
 impl FetchNode {
     pub fn from_fetch_step(step: &FetchStepData, supergraph: &SupergraphState) -> Self {
+        Self::from_fetch_step_with_deps(step, supergraph, None)
+    }
+
+    pub fn from_fetch_step_with_deps(
+        step: &FetchStepData,
+        supergraph: &SupergraphState,
+        depends_on: Option<Vec<i64>>,
+    ) -> Self {
         match step.is_entity_call() {
             true => FetchNode {
                 id: step.id,
@@ -405,6 +416,7 @@ impl FetchNode {
                 requires: Some(create_input_selection_set(&step.input)),
                 input_rewrites: step.input_rewrites.clone(),
                 output_rewrites: step.output_rewrites.clone(),
+                depends_on,
             },
             false => {
                 let operation_def = OperationDefinition {
@@ -432,6 +444,7 @@ impl FetchNode {
                     requires: None,
                     input_rewrites: step.input_rewrites.clone(),
                     output_rewrites: step.output_rewrites.clone(),
+                    depends_on,
                 }
             }
         }
@@ -440,13 +453,27 @@ impl FetchNode {
 
 impl PlanNode {
     pub fn from_fetch_step(step: &FetchStepData, supergraph: &SupergraphState) -> Self {
+        Self::from_fetch_step_with_deps(step, supergraph, None)
+    }
+
+    pub fn from_fetch_step_with_deps(
+        step: &FetchStepData,
+        supergraph: &SupergraphState,
+        depends_on: Option<Vec<i64>>,
+    ) -> Self {
         let node = if step.response_path.is_empty() {
-            PlanNode::Fetch(FetchNode::from_fetch_step(step, supergraph))
+            PlanNode::Fetch(FetchNode::from_fetch_step_with_deps(
+                step,
+                supergraph,
+                depends_on,
+            ))
         } else {
             PlanNode::Flatten(FlattenNode {
                 path: step.response_path.clone().into(),
-                node: Box::new(PlanNode::Fetch(FetchNode::from_fetch_step(
-                    step, supergraph,
+                node: Box::new(PlanNode::Fetch(FetchNode::from_fetch_step_with_deps(
+                    step,
+                    supergraph,
+                    depends_on,
                 ))),
             })
         };

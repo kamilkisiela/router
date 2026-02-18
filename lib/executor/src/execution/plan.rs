@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use bytes::BufMut;
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
@@ -201,58 +201,322 @@ impl<'exec> ExecutionJob<'exec> {
     }
 }
 
-impl<'exec> Executor<'exec> {
-    async fn execute_plan_node(&self, ctx: &mut ExecutionContext<'exec>, node: &'exec PlanNode) {
-        match node {
-            PlanNode::Parallel(parallel_node) => {
-                let mut scope = FuturesUnordered::new();
+/// A unique identifier for a DAG node
+type DagNodeId = usize;
 
-                for child in &parallel_node.nodes {
-                    // We borrow `ctx.data` only for sync preparation of the job future,
-                    // and the actual execution of the job future is done without the borrow of `ctx.data`
-                    if let Some(fut) = self.prepare_job_future(child, &ctx.data) {
-                        scope.push(fut);
+/// Represents a node in the execution DAG
+struct DagNode<'exec> {
+    /// The original plan node to execute
+    plan_node: &'exec PlanNode,
+    /// Number of dependencies that must complete before this node can run
+    dependency_count: usize,
+    /// Nodes that depend on this node (to notify when this completes)
+    dependents: Vec<DagNodeId>,
+}
+
+/// DAG scheduler for parallel execution
+struct DagScheduler<'exec> {
+    /// All nodes in the DAG
+    nodes: Vec<DagNode<'exec>>,
+    /// Current dependency counts (decremented as dependencies complete)
+    remaining_deps: Vec<usize>,
+    /// Queue of nodes ready to execute (have zero dependencies)
+    ready_queue: VecDeque<DagNodeId>,
+}
+
+impl<'exec> DagScheduler<'exec> {
+    /// Compile a PlanNode tree into a DAG
+    fn compile(root: &'exec PlanNode) -> Self {
+        let mut nodes = Vec::new();
+        let mut node_id_counter = 0;
+        let mut fetch_id_to_dag_id: HashMap<i64, DagNodeId> = HashMap::new();
+        
+        // Build DAG from plan tree, collecting fetch ID mappings
+        Self::compile_node(root, &mut nodes, &mut node_id_counter, None, &mut fetch_id_to_dag_id);
+        
+        // Apply explicit dependencies from depends_on fields
+        Self::apply_explicit_dependencies(&mut nodes, &fetch_id_to_dag_id);
+        
+        // Initialize remaining dependency counts
+        let remaining_deps = nodes.iter().map(|n| n.dependency_count).collect();
+        
+        // Initialize ready queue with ALL nodes that have no dependencies
+        let mut ready_queue = VecDeque::new();
+        for (node_id, node) in nodes.iter().enumerate() {
+            if node.dependency_count == 0 {
+                ready_queue.push_back(node_id);
+            }
+        }
+        
+        Self {
+            nodes,
+            remaining_deps,
+            ready_queue,
+        }
+    }
+    
+    /// Apply explicit dependencies from FetchNode.depends_on fields
+    fn apply_explicit_dependencies(
+        nodes: &mut Vec<DagNode<'exec>>,
+        fetch_id_to_dag_id: &HashMap<i64, DagNodeId>,
+    ) {
+        // Collect dependency information first to avoid borrowing issues
+        let mut deps_to_add: Vec<(DagNodeId, DagNodeId)> = Vec::new();
+        
+        for (node_id, dag_node) in nodes.iter().enumerate() {
+            // Check if this is a Fetch node with explicit dependencies
+            if let PlanNode::Fetch(fetch_node) = dag_node.plan_node {
+                if let Some(depends_on) = &fetch_node.depends_on {
+                    for &dep_fetch_id in depends_on {
+                        if let Some(&dep_dag_id) = fetch_id_to_dag_id.get(&dep_fetch_id) {
+                            deps_to_add.push((dep_dag_id, node_id));
+                        }
                     }
                 }
+            }
+            // Also check Flatten nodes which wrap Fetch nodes
+            else if let PlanNode::Flatten(flatten_node) = dag_node.plan_node {
+                if let PlanNode::Fetch(fetch_node) = flatten_node.node.as_ref() {
+                    if let Some(depends_on) = &fetch_node.depends_on {
+                        for &dep_fetch_id in depends_on {
+                            if let Some(&dep_dag_id) = fetch_id_to_dag_id.get(&dep_fetch_id) {
+                                deps_to_add.push((dep_dag_id, node_id));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Apply the collected dependencies
+        for (dep_dag_id, node_id) in deps_to_add {
+            // Add the dependent to the dependency's list
+            if !nodes[dep_dag_id].dependents.contains(&node_id) {
+                nodes[dep_dag_id].dependents.push(node_id);
+            }
+            // Increment the dependency count
+            nodes[node_id].dependency_count += 1;
+        }
+    }
+    
+    /// Recursively compile a plan node into DAG nodes
+    /// Returns the node ID of the last created node, None if no nodes were created
+    fn compile_node(
+        node: &'exec PlanNode,
+        nodes: &mut Vec<DagNode<'exec>>,
+        id_counter: &mut usize,
+        parent_id: Option<DagNodeId>,
+        fetch_id_to_dag_id: &mut HashMap<i64, DagNodeId>,
+    ) -> Option<DagNodeId> {
+        match node {
+            PlanNode::Sequence(seq) => {
+                // For sequence: create chain where each node depends on previous
+                let mut prev_id = parent_id;
+                for child in &seq.nodes {
+                    prev_id = Self::compile_node(child, nodes, id_counter, prev_id, fetch_id_to_dag_id);
+                }
+                prev_id
+            }
+            PlanNode::Parallel(par) => {
+                // For parallel: all children depend on parent (if any), but not on each other
+                // Process all children with the same parent_id so they execute in parallel
+                let mut last_id = None;
+                for child in &par.nodes {
+                    let child_id = Self::compile_node(child, nodes, id_counter, parent_id, fetch_id_to_dag_id);
+                    if child_id.is_some() {
+                        last_id = child_id;
+                    }
+                }
+                last_id
+            }
+            PlanNode::Condition(_cond) => {
+                // Condition nodes need runtime evaluation - treat as a work node
+                let node_id = *id_counter;
+                *id_counter += 1;
+                
+                let dag_node = DagNode {
+                    plan_node: node,
+                    dependency_count: if parent_id.is_some() { 1 } else { 0 },
+                    dependents: Vec::new(),
+                };
+                
+                nodes.push(dag_node);
+                
+                // Add dependency from parent if exists
+                if let Some(pid) = parent_id {
+                    debug_assert!(pid < node_id, "parent_id must reference an earlier node");
+                    nodes[pid].dependents.push(node_id);
+                }
+                
+                Some(node_id)
+            }
+            PlanNode::Fetch(fetch_node) => {
+                // Leaf nodes that perform actual work
+                let node_id = *id_counter;
+                *id_counter += 1;
+                
+                // Record the mapping from fetch ID to DAG node ID
+                fetch_id_to_dag_id.insert(fetch_node.id, node_id);
+                
+                let dag_node = DagNode {
+                    plan_node: node,
+                    dependency_count: if parent_id.is_some() { 1 } else { 0 },
+                    dependents: Vec::new(),
+                };
+                
+                nodes.push(dag_node);
+                
+                // Add dependency from parent if exists
+                if let Some(pid) = parent_id {
+                    debug_assert!(pid < node_id, "parent_id must reference an earlier node");
+                    nodes[pid].dependents.push(node_id);
+                }
+                
+                Some(node_id)
+            }
+            PlanNode::Flatten(flatten_node) => {
+                // Flatten node wraps another plan node
+                let node_id = *id_counter;
+                *id_counter += 1;
+                
+                // If the wrapped node is a Fetch, record its mapping
+                if let PlanNode::Fetch(fetch_node) = flatten_node.node.as_ref() {
+                    fetch_id_to_dag_id.insert(fetch_node.id, node_id);
+                }
+                
+                let dag_node = DagNode {
+                    plan_node: node,
+                    dependency_count: if parent_id.is_some() { 1 } else { 0 },
+                    dependents: Vec::new(),
+                };
+                
+                nodes.push(dag_node);
+                
+                // Add dependency from parent if exists
+                if let Some(pid) = parent_id {
+                    debug_assert!(pid < node_id, "parent_id must reference an earlier node");
+                    nodes[pid].dependents.push(node_id);
+                }
+                
+                Some(node_id)
+            }
+            // Subscription and Defer nodes not yet supported
+            PlanNode::Subscription(_) | PlanNode::Defer(_) => None,
+        }
+    }
+    
+    /// Mark a node as completed and return newly ready nodes
+    fn complete_node(&mut self, node_id: DagNodeId) -> Vec<DagNodeId> {
+        let mut newly_ready = Vec::new();
+        
+        if node_id >= self.nodes.len() {
+            return newly_ready;
+        }
+        
+        // Notify all dependents
+        for &dependent_id in &self.nodes[node_id].dependents {
+            if dependent_id < self.remaining_deps.len() {
+                self.remaining_deps[dependent_id] -= 1;
+                
+                // If dependent now has zero dependencies, it's ready
+                if self.remaining_deps[dependent_id] == 0 {
+                    newly_ready.push(dependent_id);
+                }
+            }
+        }
+        
+        newly_ready
+    }
+}
 
-                while let Some(job) = scope.next().await {
-                    self.process_job_result(ctx, job);
-                }
-            }
-            PlanNode::Sequence(sequence_node) => {
-                for child in &sequence_node.nodes {
-                    // We use `Box.pin` here to avoid the compiler error about recursive future,
-                    // as `execute_plan_node` is calling itself recursively for sequence nodes
-                    Box::pin(self.execute_plan_node(ctx, child)).await;
-                }
-            }
-            PlanNode::Condition(condition_node) => {
-                if let Some(next_node) =
-                    condition_node_by_variables(condition_node, self.variable_values)
-                {
-                    // We use `Box.pin` here to avoid the compiler error about recursive future,
-                    // as `execute_plan_node` is calling itself recursively for condition nodes
-                    Box::pin(self.execute_plan_node(ctx, next_node)).await;
-                }
-            }
-            node => {
-                if let Some(fut) = self.prepare_job_future(node, &ctx.data) {
-                    let job = fut.await;
-                    self.process_job_result(ctx, job);
+impl<'exec> Executor<'exec> {
+    async fn execute_plan_node(&self, ctx: &mut ExecutionContext<'exec>, node: &'exec PlanNode) {
+        // Compile the plan tree into a DAG
+        let mut scheduler = DagScheduler::compile(node);
+        
+        // Use FuturesUnordered for parallel execution
+        let mut executing = FuturesUnordered::new();
+        // Track which futures correspond to which node IDs using a Vec for O(1) access
+        let mut future_to_node: Vec<DagNodeId> = Vec::new();
+        let mut future_id_counter = 0;
+        
+        // Start executing ready nodes
+        while let Some(ready_node_id) = scheduler.ready_queue.pop_front() {
+            self.handle_ready_node(
+                &mut scheduler,
+                &ctx.data,
+                &mut executing,
+                &mut future_to_node,
+                &mut future_id_counter,
+                ready_node_id,
+            );
+        }
+        
+        // Process completions and launch newly ready nodes
+        while let Some((future_id, job_result)) = executing.next().await {
+            // Process the completed job
+            self.process_job_result(ctx, job_result);
+            
+            // Mark node as complete and get newly ready nodes
+            if let Some(&node_id) = future_to_node.get(future_id) {
+                let newly_ready = scheduler.complete_node(node_id);
+                
+                // Launch newly ready nodes
+                for ready_node_id in newly_ready {
+                    self.handle_ready_node(
+                        &mut scheduler,
+                        &ctx.data,
+                        &mut executing,
+                        &mut future_to_node,
+                        &mut future_id_counter,
+                        ready_node_id,
+                    );
                 }
             }
         }
     }
-
-    /**
-     * This function is sync, because we only need the immutable borrow of `ctx.data` to prepare the subgraph request,
-     * and the actual execution of the subgraph request is done in `prepare_fetch_job` which is async.
-     * So we do everything in sync with `ctx.data` and return a future for the actual execution of the subgraph request.
-     *
-     * The return type is not a future of `Option`, but `Option` of future because the only case when we don't have a future,
-     * and the result(`None`) is when the plan node is flatten node with no data.
-     */
-    fn prepare_job_future<'wave>(
+    
+    /// Handle a ready node: either spawn it for execution or complete it immediately if no work
+    fn handle_ready_node<'a>(
+        &'a self,
+        scheduler: &mut DagScheduler<'exec>,
+        data: &Value<'exec>,
+        executing: &mut FuturesUnordered<BoxFuture<'a, (usize, Result<ExecutionJob<'exec>, PlanExecutionError>)>>,
+        future_to_node: &mut Vec<DagNodeId>,
+        future_id_counter: &mut usize,
+        ready_node_id: DagNodeId,
+    ) {
+        if let Some(fut) = self.prepare_node_future(&scheduler.nodes[ready_node_id].plan_node, data) {
+            // Node has work - spawn it for execution
+            let future_id = *future_id_counter;
+            *future_id_counter += 1;
+            future_to_node.push(ready_node_id);
+            executing.push(async move { (future_id, fut.await) }.boxed());
+        } else {
+            // Node had no work (e.g., Flatten with no data)
+            // Complete it immediately and recursively process newly ready nodes
+            let mut to_process = vec![ready_node_id];
+            while let Some(nid) = to_process.pop() {
+                let newly_ready = scheduler.complete_node(nid);
+                
+                for rid in newly_ready {
+                    if let Some(fut) = self.prepare_node_future(&scheduler.nodes[rid].plan_node, data) {
+                        // Node has work - spawn it for execution
+                        let future_id = *future_id_counter;
+                        *future_id_counter += 1;
+                        future_to_node.push(rid);
+                        executing.push(async move { (future_id, fut.await) }.boxed());
+                    } else {
+                        // This node also has no work, add to processing stack
+                        to_process.push(rid);
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Prepare a future for a single plan node (non-recursive)
+    fn prepare_node_future<'wave>(
         &'wave self,
         node: &'exec PlanNode,
         data: &Value<'exec>,
@@ -262,91 +526,106 @@ impl<'exec> Executor<'exec> {
                 Some(self.prepare_fetch_job(fetch_node, None, None).boxed())
             }
             PlanNode::Flatten(flatten_node) => {
-                let fetch_node = match flatten_node.node.as_ref() {
-                    PlanNode::Fetch(fetch_node) => fetch_node,
-                    _ => return None,
-                };
-                let requires_nodes = fetch_node.requires.as_ref()?;
-
-                let mut index = 0;
-                let normalized_path = flatten_node.path.as_slice();
-                let mut filtered_representations = Vec::new();
-                filtered_representations.put(OPEN_BRACKET);
-                let possible_types = &self.schema_metadata.possible_types;
-                let mut representation_hashes: Vec<u64> = Vec::new();
-                let mut representation_hash_to_index: HashMap<u64, usize> = HashMap::new();
-                let arena = bumpalo::Bump::new();
-
-                traverse_and_callback(data, normalized_path, self.schema_metadata, &mut |entity| {
-                    let hash = entity.to_hash(&requires_nodes.items, possible_types);
-
-                    if !entity.is_null() {
-                        representation_hashes.push(hash);
-                    }
-
-                    if representation_hash_to_index.contains_key(&hash) {
-                        return;
-                    }
-
-                    let entity = if let Some(input_rewrites) = &fetch_node.input_rewrites {
-                        let new_entity = arena.alloc(entity.clone());
-                        for input_rewrite in input_rewrites {
-                            input_rewrite.rewrite(&self.schema_metadata.possible_types, new_entity);
-                        }
-                        new_entity
-                    } else {
-                        entity
-                    };
-
-                    let is_projected = project_requires(
-                        possible_types,
-                        &requires_nodes.items,
-                        entity,
-                        &mut filtered_representations,
-                        representation_hash_to_index.is_empty(),
-                        None,
-                    );
-
-                    if is_projected {
-                        representation_hash_to_index.insert(hash, index);
-                    }
-
-                    index += 1;
-                });
-
-                filtered_representations.put(CLOSE_BRACKET);
-
-                if representation_hash_to_index.is_empty() {
-                    return None;
-                }
-
-                // This is the future for the actual fetch job
-                Some(
-                    async {
-                        let fetch_job = self
-                            .prepare_fetch_job(
-                                fetch_node,
-                                Some(filtered_representations),
-                                Some(&flatten_node.path),
-                            )
-                            .await?;
-                        Ok(ExecutionJob::FlattenFetch {
-                            flatten_node_path: &flatten_node.path,
-                            response: fetch_job.response(),
-                            fetch_node_id: fetch_node.id,
-                            subgraph_name: fetch_node.service_name.as_str(),
-                            representation_hashes,
-                            representation_hash_to_index,
-                        })
-                    }
-                    .boxed(),
-                )
+                self.prepare_flatten_job(flatten_node, data)
             }
-            PlanNode::Condition(node) => condition_node_by_variables(node, self.variable_values)
-                .and_then(|node| self.prepare_job_future(node, data)),
-            // Our Query Planner does not produce any other plan node types in ParallelNode
+            PlanNode::Condition(condition_node) => {
+                // Evaluate condition and prepare the selected branch
+                if let Some(selected_node) = condition_node_by_variables(condition_node, self.variable_values) {
+                    self.prepare_node_future(selected_node, data)
+                } else {
+                    None
+                }
+            }
+            // Sequence and Parallel should have been decomposed by compile_node
             _ => None,
         }
+    }
+    
+    /// Prepare a job for a Flatten node
+    fn prepare_flatten_job<'wave>(
+        &'wave self,
+        flatten_node: &'exec hive_router_query_planner::planner::plan_nodes::FlattenNode,
+        data: &Value<'exec>,
+    ) -> Option<BoxFuture<'wave, Result<ExecutionJob<'exec>, PlanExecutionError>>> {
+        let fetch_node = match flatten_node.node.as_ref() {
+            PlanNode::Fetch(fetch_node) => fetch_node,
+            _ => return None,
+        };
+        let requires_nodes = fetch_node.requires.as_ref()?;
+
+        let mut index = 0;
+        let normalized_path = flatten_node.path.as_slice();
+        let mut filtered_representations = Vec::new();
+        filtered_representations.put(OPEN_BRACKET);
+        let possible_types = &self.schema_metadata.possible_types;
+        let mut representation_hashes: Vec<u64> = Vec::new();
+        let mut representation_hash_to_index: HashMap<u64, usize> = HashMap::new();
+        let arena = bumpalo::Bump::new();
+
+        traverse_and_callback(data, normalized_path, self.schema_metadata, &mut |entity| {
+            let hash = entity.to_hash(&requires_nodes.items, possible_types);
+
+            if !entity.is_null() {
+                representation_hashes.push(hash);
+            }
+
+            if representation_hash_to_index.contains_key(&hash) {
+                return;
+            }
+
+            let entity = if let Some(input_rewrites) = &fetch_node.input_rewrites {
+                let new_entity = arena.alloc(entity.clone());
+                for input_rewrite in input_rewrites {
+                    input_rewrite.rewrite(&self.schema_metadata.possible_types, new_entity);
+                }
+                new_entity
+            } else {
+                entity
+            };
+
+            let is_projected = project_requires(
+                possible_types,
+                &requires_nodes.items,
+                entity,
+                &mut filtered_representations,
+                representation_hash_to_index.is_empty(),
+                None,
+            );
+
+            if is_projected {
+                representation_hash_to_index.insert(hash, index);
+            }
+
+            index += 1;
+        });
+
+        filtered_representations.put(CLOSE_BRACKET);
+
+        if representation_hash_to_index.is_empty() {
+            return None;
+        }
+
+        // This is the future for the actual fetch job
+        Some(
+            async {
+                let fetch_job = self
+                    .prepare_fetch_job(
+                        fetch_node,
+                        Some(filtered_representations),
+                        Some(&flatten_node.path),
+                    )
+                    .await?;
+                Ok(ExecutionJob::FlattenFetch {
+                    flatten_node_path: &flatten_node.path,
+                    response: fetch_job.response(),
+                    fetch_node_id: fetch_node.id,
+                    subgraph_name: fetch_node.service_name.as_str(),
+                    representation_hashes,
+                    representation_hash_to_index,
+                })
+            }
+            .boxed(),
+        )
     }
 
     // We handle `Result` instead of passing `PlanExecutionError` directly
@@ -861,6 +1140,7 @@ mod tests {
                             output_rewrites: None,
                             variable_usages: None,
                             operation_kind: None,
+                            depends_on: None,
                         }),
                         PlanNode::Fetch(FetchNode {
                             id: 2,
@@ -876,6 +1156,7 @@ mod tests {
                             output_rewrites: None,
                             variable_usages: None,
                             operation_kind: None,
+                            depends_on: None,
                         }),
                     ],
                 }),
@@ -888,5 +1169,488 @@ mod tests {
             .recv()
             .expect("Failed to receive from_a value through channel");
         assert_eq!(from_a_value, "value_a");
+    }
+
+    #[tokio::test]
+    async fn dag_scheduler_maintains_sequence_order() {
+        // This test verifies that the DAG scheduler correctly maintains sequential
+        // execution order when nodes are in a Sequence
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let mut subgraph_a = mockito::Server::new_async().await;
+        let mut subgraph_b = mockito::Server::new_async().await;
+        
+        let data = crate::response::value::Value::Null;
+        let subgraph_endpoint_map = HashMap::from([
+            (
+                "subgraph_a".to_string(),
+                format!("http://{}/graphql", subgraph_a.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+            (
+                "subgraph_b".to_string(),
+                format!("http://{}/graphql", subgraph_b.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+        ]);
+        
+        let executor = Executor {
+            variable_values: &None,
+            schema_metadata: &SchemaMetadata::default(),
+            executors: &SubgraphExecutorMap::from_http_endpoint_map(
+                &subgraph_endpoint_map,
+                HiveRouterConfig::default().into(),
+                Arc::new(TelemetryContext::from_propagation_config(
+                    &Default::default(),
+                )),
+            )
+            .unwrap(),
+            client_request: &ClientRequestDetails {
+                method: &http::Method::POST,
+                url: &"http://example.com".parse().unwrap(),
+                headers: &HeaderMap::new(),
+                operation: OperationDetails {
+                    name: None,
+                    query: "{ from_a from_b }",
+                    kind: "query",
+                },
+                jwt: JwtRequestDetails::Unauthenticated,
+            },
+            headers_plan: &HeaderRulesPlan::default(),
+            jwt_forwarding_plan: None,
+            dedupe_subgraph_requests: false,
+        };
+
+        // Mock subgraphs - b should only be called after a completes
+        let (sender, receiver) = channel();
+        
+        let mock_a = subgraph_a
+            .mock("POST", "/graphql")
+            .with_chunked_body(move |writer| {
+                sender.send("a_started").unwrap();
+                std::thread::sleep(Duration::from_millis(100));
+                writer.write_fmt(format_args!(r#"{{"data":{{"from_a":"value_a"}}}}"#))
+            })
+            .create();
+
+        let (sender_b, receiver_b) = channel();
+        let mock_b = subgraph_b
+            .mock("POST", "/graphql")
+            .with_chunked_body(move |writer| {
+                sender_b.send("b_started").unwrap();
+                writer.write_fmt(format_args!(r#"{{"data":{{"from_b":"value_b"}}}}"#))
+            })
+            .create();
+
+        let mut exec_ctx = ExecutionContext {
+            data,
+            ..Default::default()
+        };
+
+        let dummy_doc = Document {
+            operation: OperationDefinition {
+                name: None,
+                operation_kind: None,
+                variable_definitions: None,
+                selection_set: SelectionSet { items: vec![] },
+            },
+            fragments: vec![],
+        };
+        
+        // Test Plan: Sequence with two Fetch nodes
+        // DAG scheduler should maintain sequential order
+        executor
+            .execute_plan_node(
+                &mut exec_ctx,
+                &PlanNode::Sequence(hive_router_query_planner::planner::plan_nodes::SequenceNode {
+                    nodes: vec![
+                        PlanNode::Fetch(FetchNode {
+                            id: 1,
+                            service_name: "subgraph_a".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_a }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                            depends_on: None,
+                        }),
+                        PlanNode::Fetch(FetchNode {
+                            id: 2,
+                            service_name: "subgraph_b".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_b }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                            depends_on: None,
+                        }),
+                    ],
+                }),
+            )
+            .await;
+        
+        mock_a.assert();
+        mock_b.assert();
+        
+        // Verify sequential execution: a must start before b
+        let a_msg = receiver.recv().expect("Should receive a_started");
+        assert_eq!(a_msg, "a_started");
+        
+        let b_msg = receiver_b.recv().expect("Should receive b_started");
+        assert_eq!(b_msg, "b_started");
+    }
+
+    #[tokio::test]
+    async fn dag_scheduler_respects_explicit_depends_on() {
+        // This test verifies that the DAG scheduler respects explicit dependencies
+        // specified in the depends_on field, allowing parallel execution within
+        // Parallel blocks when there are no explicit dependencies
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let mut subgraph_a = mockito::Server::new_async().await;
+        let mut subgraph_b = mockito::Server::new_async().await;
+        let mut subgraph_c = mockito::Server::new_async().await;
+        
+        let data = crate::response::value::Value::Null;
+        let subgraph_endpoint_map = HashMap::from([
+            (
+                "subgraph_a".to_string(),
+                format!("http://{}/graphql", subgraph_a.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+            (
+                "subgraph_b".to_string(),
+                format!("http://{}/graphql", subgraph_b.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+            (
+                "subgraph_c".to_string(),
+                format!("http://{}/graphql", subgraph_c.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+        ]);
+        
+        let executor = Executor {
+            variable_values: &None,
+            schema_metadata: &SchemaMetadata::default(),
+            executors: &SubgraphExecutorMap::from_http_endpoint_map(
+                &subgraph_endpoint_map,
+                HiveRouterConfig::default().into(),
+                Arc::new(TelemetryContext::from_propagation_config(
+                    &Default::default(),
+                )),
+            )
+            .unwrap(),
+            client_request: &ClientRequestDetails {
+                method: &http::Method::POST,
+                url: &"http://example.com".parse().unwrap(),
+                headers: &HeaderMap::new(),
+                operation: OperationDetails {
+                    name: None,
+                    query: "{ from_a from_b from_c }",
+                    kind: "query",
+                },
+                jwt: JwtRequestDetails::Unauthenticated,
+            },
+            headers_plan: &HeaderRulesPlan::default(),
+            jwt_forwarding_plan: None,
+            dedupe_subgraph_requests: false,
+        };
+
+        // Mock subgraphs
+        let mock_a = subgraph_a
+            .mock("POST", "/graphql")
+            .with_body(r#"{"data":{"from_a":"value_a"}}"#)
+            .create();
+
+        let mock_b = subgraph_b
+            .mock("POST", "/graphql")
+            .with_body(r#"{"data":{"from_b":"value_b"}}"#)
+            .create();
+
+        let mock_c = subgraph_c
+            .mock("POST", "/graphql")
+            .with_body(r#"{"data":{"from_c":"value_c"}}"#)
+            .create();
+
+        let mut exec_ctx = ExecutionContext {
+            data,
+            ..Default::default()
+        };
+
+        let dummy_doc = Document {
+            operation: OperationDefinition {
+                name: None,
+                operation_kind: None,
+                variable_definitions: None,
+                selection_set: SelectionSet { items: vec![] },
+            },
+            fragments: vec![],
+        };
+        
+        // Test Plan: Parallel block with three fetches
+        // Fetch B explicitly depends on Fetch A (depends_on: Some(vec![1]))
+        // Fetch C has no explicit dependencies
+        // Expected: A and C can run in parallel, B waits for A
+        executor
+            .execute_plan_node(
+                &mut exec_ctx,
+                &PlanNode::Parallel(ParallelNode {
+                    nodes: vec![
+                        PlanNode::Fetch(FetchNode {
+                            id: 1,
+                            service_name: "subgraph_a".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_a }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                            depends_on: None, // A has no dependencies
+                        }),
+                        PlanNode::Fetch(FetchNode {
+                            id: 2,
+                            service_name: "subgraph_b".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_b }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                            depends_on: Some(vec![1]), // B depends on A
+                        }),
+                        PlanNode::Fetch(FetchNode {
+                            id: 3,
+                            service_name: "subgraph_c".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_c }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                            depends_on: None, // C has no dependencies
+                        }),
+                    ],
+                }),
+            )
+            .await;
+        
+        mock_a.assert();
+        mock_b.assert();
+        mock_c.assert();
+        
+        // All three should execute successfully
+        // The DAG scheduler should handle the explicit dependency from B to A
+    }
+
+    #[tokio::test]
+    async fn dag_scheduler_waits_for_all_deps() {
+        // This test verifies that a node waits for ALL its dependencies before executing
+        // Test scenario: D depends on both A and B
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let mut subgraph_a = mockito::Server::new_async().await;
+        let mut subgraph_b = mockito::Server::new_async().await;
+        let mut subgraph_d = mockito::Server::new_async().await;
+        
+        let data = crate::response::value::Value::Null;
+        let subgraph_endpoint_map = HashMap::from([
+            (
+                "subgraph_a".to_string(),
+                format!("http://{}/graphql", subgraph_a.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+            (
+                "subgraph_b".to_string(),
+                format!("http://{}/graphql", subgraph_b.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+            (
+                "subgraph_d".to_string(),
+                format!("http://{}/graphql", subgraph_d.host_with_port())
+                    .parse()
+                    .unwrap(),
+            ),
+        ]);
+        
+        let executor = Executor {
+            variable_values: &None,
+            schema_metadata: &SchemaMetadata::default(),
+            executors: &SubgraphExecutorMap::from_http_endpoint_map(
+                &subgraph_endpoint_map,
+                HiveRouterConfig::default().into(),
+                Arc::new(TelemetryContext::from_propagation_config(
+                    &Default::default(),
+                )),
+            )
+            .unwrap(),
+            client_request: &ClientRequestDetails {
+                method: &http::Method::POST,
+                url: &"http://example.com".parse().unwrap(),
+                headers: &HeaderMap::new(),
+                operation: OperationDetails {
+                    name: None,
+                    query: "{ from_a from_b from_d }",
+                    kind: "query",
+                },
+                jwt: JwtRequestDetails::Unauthenticated,
+            },
+            headers_plan: &HeaderRulesPlan::default(),
+            jwt_forwarding_plan: None,
+            dedupe_subgraph_requests: false,
+        };
+
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc as StdArc;
+        
+        let a_done = StdArc::new(AtomicBool::new(false));
+        let b_done = StdArc::new(AtomicBool::new(false));
+        let a_done_clone = a_done.clone();
+        let b_done_clone = b_done.clone();
+        let a_done_for_d = a_done.clone();
+        let b_done_for_d = b_done.clone();
+
+        // Mock subgraphs with delays
+        let mock_a = subgraph_a
+            .mock("POST", "/graphql")
+            .with_chunked_body(move |writer| {
+                std::thread::sleep(Duration::from_millis(50));
+                a_done_clone.store(true, Ordering::SeqCst);
+                writer.write_fmt(format_args!(r#"{{"data":{{"from_a":"value_a"}}}}"#))
+            })
+            .create();
+
+        let mock_b = subgraph_b
+            .mock("POST", "/graphql")
+            .with_chunked_body(move |writer| {
+                std::thread::sleep(Duration::from_millis(50));
+                b_done_clone.store(true, Ordering::SeqCst);
+                writer.write_fmt(format_args!(r#"{{"data":{{"from_b":"value_b"}}}}"#))
+            })
+            .create();
+
+        let mock_d = subgraph_d
+            .mock("POST", "/graphql")
+            .with_chunked_body(move |writer| {
+                // D should only be called after both A and B are done
+                let a_was_done = a_done_for_d.load(Ordering::SeqCst);
+                let b_was_done = b_done_for_d.load(Ordering::SeqCst);
+                assert!(a_was_done, "D was called before A completed");
+                assert!(b_was_done, "D was called before B completed");
+                writer.write_fmt(format_args!(r#"{{"data":{{"from_d":"value_d"}}}}"#))
+            })
+            .create();
+
+        let mut exec_ctx = ExecutionContext {
+            data,
+            ..Default::default()
+        };
+
+        let dummy_doc = Document {
+            operation: OperationDefinition {
+                name: None,
+                operation_kind: None,
+                variable_definitions: None,
+                selection_set: SelectionSet { items: vec![] },
+            },
+            fragments: vec![],
+        };
+        
+        // Test Plan: Parallel block with three fetches
+        // A and B have no dependencies
+        // D depends on both A and B
+        // Expected: A and B run in parallel, D waits for BOTH
+        executor
+            .execute_plan_node(
+                &mut exec_ctx,
+                &PlanNode::Parallel(ParallelNode {
+                    nodes: vec![
+                        PlanNode::Fetch(FetchNode {
+                            id: 1,
+                            service_name: "subgraph_a".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_a }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                            depends_on: None, // A has no dependencies
+                        }),
+                        PlanNode::Fetch(FetchNode {
+                            id: 2,
+                            service_name: "subgraph_b".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_b }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                            depends_on: None, // B has no dependencies
+                        }),
+                        PlanNode::Fetch(FetchNode {
+                            id: 4,
+                            service_name: "subgraph_d".to_string(),
+                            operation: SubgraphFetchOperation {
+                                document_str: "{ from_d }".to_string(),
+                                document: dummy_doc.clone(),
+                                hash: 0,
+                            },
+                            operation_name: None,
+                            requires: None,
+                            input_rewrites: None,
+                            output_rewrites: None,
+                            variable_usages: None,
+                            operation_kind: None,
+                            depends_on: Some(vec![1, 2]), // D depends on BOTH A and B
+                        }),
+                    ],
+                }),
+            )
+            .await;
+        
+        mock_a.assert();
+        mock_b.assert();
+        mock_d.assert();
     }
 }

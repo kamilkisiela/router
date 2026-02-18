@@ -484,6 +484,9 @@ fn simple_mismatch_between_union_fields() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           }
@@ -720,6 +723,9 @@ fn nested_internal_mismatch_between_fields() -> Result<(), Box<dyn Error>> {
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           }
@@ -1125,6 +1131,9 @@ fn deeply_nested_internal_mismatch_between_fields() -> Result<(), Box<dyn Error>
                     }
                   ]
                 }
+              ],
+              "dependsOn": [
+                2
               ]
             }
           }
