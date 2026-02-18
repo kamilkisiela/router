@@ -138,18 +138,39 @@ pub fn start_subgraphs_server(
     println!("Starting server on http://{}:{}", host, port);
 
     let server_handle = tokio::spawn(async move {
-        axum::serve(
-            TcpListener::bind(&format!("{}:{}", host, port))
-                .await
-                .unwrap(),
-            app,
-        )
-        .with_graceful_shutdown(async {
-            shutdown_rx.await.ok();
-            println!("Graceful shutdown signal received.");
-        })
-        .await
-        .expect("failed to start subgraphs server");
+        // Retry binding to the port with exponential backoff
+        let listener = {
+            let mut attempts = 0;
+            let max_attempts = 20; // Increased from 10
+            loop {
+                match TcpListener::bind(&format!("{}:{}", host, port)).await {
+                    Ok(listener) => break listener,
+                    Err(e) if attempts < max_attempts => {
+                        attempts += 1;
+                        let delay_ms = 2_u64.pow(attempts.min(8)) * 10; // Cap exponential growth at 2^8
+                        eprintln!(
+                            "Failed to bind to {}:{} (attempt {}/{}): {}. Retrying in {}ms...",
+                            host, port, attempts, max_attempts, e, delay_ms
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                    }
+                    Err(e) => {
+                        panic!(
+                            "Failed to bind to {}:{} after {} attempts: {}",
+                            host, port, max_attempts, e
+                        );
+                    }
+                }
+            }
+        };
+
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                shutdown_rx.await.ok();
+                println!("Graceful shutdown signal received.");
+            })
+            .await
+            .expect("failed to start subgraphs server");
     });
 
     (server_handle, shutdown_tx, shared_state)

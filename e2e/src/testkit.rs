@@ -17,6 +17,7 @@ use ntex::{
 };
 use sonic_rs::json;
 use subgraphs::{start_subgraphs_server, RequestLog, SubgraphsServiceState};
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 pub mod otel;
@@ -76,6 +77,7 @@ where
 }
 
 pub struct SubgraphsServer {
+    server_handle: Option<JoinHandle<()>>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     subgraph_shared_state: Arc<SubgraphsServiceState>,
 }
@@ -84,6 +86,15 @@ impl Drop for SubgraphsServer {
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
+            
+            // Wait for the server to actually shut down before releasing the port
+            if let Some(handle) = self.server_handle.take() {
+                // Give the server time to shut down gracefully
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                
+                // Abort the task if it's still running
+                handle.abort();
+            }
         }
     }
 }
@@ -95,7 +106,7 @@ impl SubgraphsServer {
     }
 
     pub async fn start_with_port(port: u16) -> Self {
-        let (_server_handle, shutdown_tx, subgraph_shared_state) =
+        let (server_handle, shutdown_tx, subgraph_shared_state) =
             start_subgraphs_server(Some(port));
 
         loop {
@@ -112,6 +123,7 @@ impl SubgraphsServer {
         }
 
         Self {
+            server_handle: Some(server_handle),
             shutdown_tx: Some(shutdown_tx),
             subgraph_shared_state,
         }
