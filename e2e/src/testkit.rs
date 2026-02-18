@@ -89,8 +89,8 @@ impl Drop for SubgraphsServer {
             
             // Wait for the server to actually shut down before releasing the port
             if let Some(handle) = self.server_handle.take() {
-                // Give the server time to shut down gracefully
-                std::thread::sleep(std::time::Duration::from_millis(300));
+                // Give the server time to shut down gracefully and OS to release port
+                std::thread::sleep(std::time::Duration::from_millis(500));
                 
                 // Abort the task if it's still running
                 handle.abort();
